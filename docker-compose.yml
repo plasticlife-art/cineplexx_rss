@@ -7,6 +7,8 @@ services:
     container_name: cineplexx_worker_dev
     env_file:
       - ./app/.env
+    environment:
+      DEBUG: pw:api
     volumes:
       - rss_out:/out:z
     restart: unless-stopped
@@ -18,6 +20,8 @@ services:
     user: "0:0"
     env_file:
       - ./app/.env
+    environment:
+      DEBUG: pw:api
     volumes:
       - rss_out:/out:z
     restart: unless-stopped

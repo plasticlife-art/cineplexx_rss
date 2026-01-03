@@ -60,12 +60,36 @@ async def scrape_movies(base_url: str, location: str, date_str: str) -> List[Mov
             desc = ""
             try:
                 await page.goto(url, wait_until="networkidle", timeout=60000)
+                # Dismiss cookie overlay if present; it blocks clicks.
+                try:
+                    await page.evaluate("""() => {
+                        const ids = ["CybotCookiebotDialog", "CybotCookiebotDialogBodyUnderlay"];
+                        for (const id of ids) {
+                            const el = document.getElementById(id);
+                            if (el) el.remove();
+                        }
+                        document.body.style.overflow = "auto";
+                    }""")
+                except Exception:
+                    pass
                 # Prefer specific movie description paragraphs on film pages.
                 await page.wait_for_selector(".b-movie-description__text, .b-movie-description", timeout=8000)
                 # Expand if the description is collapsed.
                 try:
                     btn = page.locator(".b-movie-description__btn")
                     if await btn.count():
+                        # In case overlay reappears, remove it again before clicking.
+                        try:
+                            await page.evaluate("""() => {
+                                const ids = ["CybotCookiebotDialog", "CybotCookiebotDialogBodyUnderlay"];
+                                for (const id of ids) {
+                                    const el = document.getElementById(id);
+                                    if (el) el.remove();
+                                }
+                                document.body.style.overflow = "auto";
+                            }""")
+                        except Exception:
+                            pass
                         await btn.first.click()
                         await page.wait_for_timeout(500)
                 except Exception:
