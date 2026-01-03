@@ -79,3 +79,45 @@ def build_rss_xml(
     lines.append("</channel>")
     lines.append("</rss>")
     return "\n".join(lines)
+
+
+def build_telegram_rss_xml(
+    *,
+    title: str,
+    link: str,
+    description: str,
+    now: datetime,
+    items: List[dict],
+) -> str:
+    pub_date = format_datetime(now)
+    lines = []
+    lines.append('<?xml version="1.0" encoding="UTF-8"?>')
+    lines.append('<rss version="2.0">')
+    lines.append("<channel>")
+    lines.append(f"<title>{escape(title)}</title>")
+    lines.append(f"<link>{escape(link)}</link>")
+    lines.append(f"<description>{escape(description)}</description>")
+    lines.append(f"<lastBuildDate>{escape(pub_date)}</lastBuildDate>")
+
+    for item in items:
+        item_title = item.get("title") or "Post"
+        item_link = item.get("url") or link
+        item_desc = item.get("description") or ""
+        item_guid = item.get("guid") or item_link
+        try:
+            item_dt = datetime.fromisoformat(item.get("published") or "")
+        except Exception:
+            item_dt = now
+
+        lines.append("<item>")
+        lines.append(f"<title>{escape(item_title)}</title>")
+        lines.append(f"<link>{escape(item_link)}</link>")
+        lines.append(f"<guid isPermaLink=\"true\">{escape(item_guid)}</guid>")
+        lines.append(f"<pubDate>{escape(format_datetime(item_dt))}</pubDate>")
+        if item_desc:
+            lines.append(f"<description>{escape(item_desc)}</description>")
+        lines.append("</item>")
+
+    lines.append("</channel>")
+    lines.append("</rss>")
+    return "\n".join(lines)

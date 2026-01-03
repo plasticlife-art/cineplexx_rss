@@ -16,6 +16,8 @@ class Config:
     out_dir: Path
     rss_filename: str
     events_limit: int
+    telegram_channels: list[str]
+    telegram_post_limit: int
 
     feed_title: str
     feed_link: str
@@ -31,6 +33,11 @@ def load_config() -> Config:
         except Exception:
             return default
 
+    def _list(name: str) -> list[str]:
+        raw = os.getenv(name, "")
+        items = [x.strip() for x in raw.split(",") if x.strip()]
+        return items
+
     return Config(
         base_url=os.getenv("BASE_URL", "https://cineplexx.me").rstrip("/"),
         location=os.getenv("LOCATION", "0"),
@@ -39,8 +46,10 @@ def load_config() -> Config:
         timezone=os.getenv("TIMEZONE", "Europe/Podgorica"),
 
         out_dir=out_dir,
-        rss_filename=os.getenv("RSS_FILENAME", "rss.xml"),
+        rss_filename=os.getenv("RSS_FILENAME", "cineplexx_rss.xml"),
         events_limit=_int("EVENTS_LIMIT", 150),
+        telegram_channels=_list("TELEGRAM_CHANNELS"),
+        telegram_post_limit=_int("TELEGRAM_POST_LIMIT", 5),
 
         feed_title=os.getenv("FEED_TITLE", "Cineplexx — репертуар"),
         feed_link=os.getenv("FEED_LINK", "https://cineplexx.me"),

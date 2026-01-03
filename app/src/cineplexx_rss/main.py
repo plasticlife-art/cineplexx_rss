@@ -6,7 +6,8 @@ from pathlib import Path
 from .config import load_config
 from .scraper import scrape_movies
 from .state import load_state, save_state, compute_diff, append_events, update_snapshot
-from .rss import build_rss_xml
+from .rss import build_rss_xml, build_telegram_rss_xml
+from .telegram import scrape_telegram_channel
 
 def resolve_date(cfg) -> str:
     tz = ZoneInfo(cfg.timezone)
@@ -47,6 +48,37 @@ async def run():
         current_items=current,
     )
     rss_path.write_text(rss_xml, "utf-8")
+
+    if cfg.telegram_channels:
+        for channel in cfg.telegram_channels:
+            try:
+                tg = await asyncio.to_thread(
+                    scrape_telegram_channel,
+                    channel,
+                    cfg.telegram_post_limit,
+                )
+            except Exception:
+                continue
+
+            items = [
+                {
+                    "title": p.title,
+                    "url": p.url,
+                    "description": p.description,
+                    "published": p.published,
+                    "guid": p.url,
+                }
+                for p in tg.posts
+            ]
+            tg_rss = build_telegram_rss_xml(
+                title=tg.title,
+                link=f"https://t.me/{channel}",
+                description=tg.description,
+                now=now,
+                items=items,
+            )
+            tg_path = cfg.out_dir / f"{channel}.xml"
+            tg_path.write_text(tg_rss, "utf-8")
 
 def main():
     asyncio.run(run())
