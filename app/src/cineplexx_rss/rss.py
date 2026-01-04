@@ -119,7 +119,8 @@ def build_rss_xml(
         if sessions_html:
             content_parts.append(sessions_html)
         if content_parts:
-            lines.append(f"<content:encoded>{_cdata('\\n'.join(content_parts))}</content:encoded>")
+            content_html = "\n".join(content_parts)
+            lines.append(f"<content:encoded>{_cdata(content_html)}</content:encoded>")
         lines.append("</item>")
 
     lines.append("</channel>")
