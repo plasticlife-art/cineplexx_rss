@@ -163,9 +163,10 @@ async def run(cfg, logger: logging.Logger, cache) -> dict:
                 tg_path,
             )
 
+    location_label = "Podgorica" if cfg.location == "0" else cfg.location
     feeds: list[FeedLink] = [
         FeedLink(
-            title=f"Cineplexx — {cfg.location}",
+            title=f"Cineplexx — {location_label}",
             href=cfg.rss_filename,
             kind="cineplexx",
             subtitle=cfg.feed_description,

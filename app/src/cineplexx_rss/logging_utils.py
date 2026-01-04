@@ -2,6 +2,7 @@ import logging
 import sys
 import uuid
 from contextvars import ContextVar
+from datetime import datetime, timedelta, timezone
 
 _RUN_ID: ContextVar[str] = ContextVar("run_id", default="unknown")
 
@@ -29,7 +30,15 @@ def setup_logging(log_level: str) -> logging.Logger:
     root.handlers.clear()
 
     handler = logging.StreamHandler(sys.stdout)
-    formatter = logging.Formatter(
+
+    class CETFormatter(logging.Formatter):
+        def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+            tz = timezone(timedelta(hours=1))
+            dt = datetime.fromtimestamp(record.created, tz=tz)
+            ms = int(record.msecs)
+            return f"{dt:%Y-%m-%d %H:%M:%S},{ms:03d} {dt:%z}"
+
+    formatter = CETFormatter(
         "%(asctime)s %(levelname)s %(name)s run_id=%(run_id)s %(message)s"
     )
     handler.setFormatter(formatter)

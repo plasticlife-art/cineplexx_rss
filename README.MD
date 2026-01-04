@@ -8,6 +8,7 @@ Built for running as a worker container with nginx serving static XML files.
 - Cineplexx RSS with diff events (added/removed) + current movies.
 - Movie descriptions and sessions (date, time, hall, info).
 - Redis cache for film descriptions and sessions.
+- `/index.html` human-friendly feed index + `/index.xml` machine index.
 - Status file: `/out/status.json` with last run results.
 - Logs to stdout with run_id correlation.
 
