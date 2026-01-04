@@ -415,16 +415,39 @@ def build_index_html(
 
       q.addEventListener('input', filter);
 
+      function fallbackCopy(text) {{
+        const input = document.createElement('input');
+        input.value = text;
+        document.body.appendChild(input);
+        input.select();
+        input.setSelectionRange(0, text.length);
+        const ok = document.execCommand('copy');
+        document.body.removeChild(input);
+        return ok;
+      }}
+
       document.addEventListener('click', async (e) => {{
         const btn = e.target.closest('[data-copy]');
         if (!btn) return;
         const href = btn.getAttribute('data-copy');
+        const fullHref = new URL(href, window.location.href).href;
         try {{
-          // Copy relative link; browsers will paste as-is.
-          await navigator.clipboard.writeText(href);
-          showToast('Copied: ' + href);
-        }} catch {{
+          if (navigator.clipboard && window.isSecureContext) {{
+            await navigator.clipboard.writeText(fullHref);
+            showToast('Copied: ' + fullHref);
+            return;
+          }}
+          if (fallbackCopy(fullHref)) {{
+            showToast('Copied: ' + fullHref);
+            return;
+          }}
           showToast('Copy failed');
+        }} catch {{
+          if (fallbackCopy(fullHref)) {{
+            showToast('Copied: ' + fullHref);
+          }} else {{
+            showToast('Copy failed');
+          }}
         }}
       }});
     }})();
