@@ -29,7 +29,7 @@ Then open:
 
 ## Production (Docker, prod profile)
 ```bash
-WORKER_IMAGE=ghcr.io/<owner>/cineplexx_rss:latest \
+WORKER_IMAGE=ghcr.io/plasticlife-art/my_rss_hub:latest \
 NGINX_PORT=80 \
 docker compose --profile prod up -d --pull always
 ```
