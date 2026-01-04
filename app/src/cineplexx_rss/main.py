@@ -220,7 +220,8 @@ def main() -> None:
     set_run_id(run_id)
     logger = logging.getLogger(__name__)
 
-    started_at = datetime.now(timezone.utc)
+    status_tz = ZoneInfo(os.getenv("TIMEZONE", "CET"))
+    started_at = datetime.now(status_tz)
     start_ts = perf_counter()
     status = "ok"
     errors = []
@@ -270,7 +271,7 @@ def main() -> None:
         logger.exception("run_failed")
         error_exc = exc
     finally:
-        finished_at = datetime.now(timezone.utc)
+        finished_at = datetime.now(status_tz)
         duration_ms = int((perf_counter() - start_ts) * 1000)
         status_payload = {
             "run_id": run_id,
