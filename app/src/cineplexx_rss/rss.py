@@ -141,12 +141,13 @@ def build_telegram_rss_xml(
     description: str,
     now: datetime,
     items: List[dict],
+    images_mode: str,
 ) -> str:
     logger = logging.getLogger(__name__)
     pub_date = format_datetime(now)
     lines = []
     lines.append('<?xml version="1.0" encoding="UTF-8"?>')
-    lines.append('<rss version="2.0">')
+    lines.append('<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">')
     lines.append("<channel>")
     lines.append(f"<title>{escape(title)}</title>")
     lines.append(f"<link>{escape(link)}</link>")
@@ -157,11 +158,28 @@ def build_telegram_rss_xml(
         item_title = item.get("title") or "Post"
         item_link = item.get("url") or link
         item_desc = item.get("description") or ""
+        item_text = item.get("content_text") or item_desc
+        images = item.get("images") or []
         item_guid = item.get("guid") or item_link
         try:
             item_dt = datetime.fromisoformat(item.get("published") or "")
         except Exception:
             item_dt = now
+
+        content_parts = []
+        if item_text:
+            text_html = escape(item_text).replace("\n", "<br/>")
+            content_parts.append(f"<p>{text_html}</p>")
+
+        if images_mode == "first" and images:
+            images = images[:1]
+        elif images_mode == "none":
+            images = []
+
+        for img in images:
+            if not img:
+                continue
+            content_parts.append(f'<img src="{escape(img)}" />')
 
         lines.append("<item>")
         lines.append(f"<title>{escape(item_title)}</title>")
@@ -170,6 +188,9 @@ def build_telegram_rss_xml(
         lines.append(f"<pubDate>{escape(format_datetime(item_dt))}</pubDate>")
         if item_desc:
             lines.append(f"<description>{_cdata(item_desc)}</description>")
+        if content_parts:
+            content_html = "\n".join(content_parts)
+            lines.append(f"<content:encoded>{_cdata(content_html)}</content:encoded>")
         lines.append("</item>")
 
     lines.append("</channel>")

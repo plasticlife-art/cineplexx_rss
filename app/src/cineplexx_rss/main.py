@@ -140,6 +140,8 @@ async def run(cfg, logger: logging.Logger, cache) -> dict:
                     "title": p.title,
                     "url": p.url,
                     "description": p.description,
+                    "content_text": p.description,
+                    "images": p.images,
                     "published": p.published,
                     "guid": p.url,
                 }
@@ -151,6 +153,7 @@ async def run(cfg, logger: logging.Logger, cache) -> dict:
                 description=tg.description,
                 now=now,
                 items=items,
+                images_mode=cfg.telegram_images_mode,
             )
             tg_path = cfg.out_dir / f"{channel}.xml"
             tg_path.write_text(tg_rss, "utf-8")

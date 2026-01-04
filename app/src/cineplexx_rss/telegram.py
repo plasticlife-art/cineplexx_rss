@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from html.parser import HTMLParser
 from typing import List, Optional, Dict
 from urllib.request import Request, urlopen
@@ -18,6 +19,7 @@ class TelegramPost:
     published: str
     title: str
     description: str
+    images: List[str]
 
 
 @dataclass(frozen=True)
@@ -176,6 +178,7 @@ def _fetch(url: str) -> str:
 
 
 def scrape_telegram_channel(channel: str, limit: int) -> TelegramChannel:
+    logger = logging.getLogger(__name__)
     base = f"https://t.me/s/{channel}"
     html = _fetch(base)
     parser = _TelegramHtmlParser(channel)
@@ -214,24 +217,26 @@ def scrape_telegram_channel(channel: str, limit: int) -> TelegramChannel:
         if extra_links:
             desc = (desc + "\n\n" if desc else "") + "\n".join(extra_links)
 
-        media_lines: List[str] = []
-        image_urls = _dedupe([m.get("url") for m in media_items if m.get("kind") == "image" and m.get("url")])
-        for img in image_urls:
-            media_lines.append(f'<img src="{img}" />')
+        image_urls = _dedupe(
+            [m.get("url") for m in media_items if m.get("kind") == "image" and m.get("url")]
+        )
+        if any(m.get("kind") == "image" and not m.get("url") for m in media_items):
+            logger.warning("telegram_image_missing_url channel=%s post=%s", channel, post_id)
 
         file_urls = _dedupe([m.get("url") for m in media_items if m.get("kind") == "video" and m.get("url")])
+        media_labels: List[str] = []
         for file_url in file_urls:
             name = urlparse(file_url).path.rsplit("/", 1)[-1]
             label = name or "video"
-            media_lines.append(f"file: {label}")
+            media_labels.append(f"file: {label}")
 
         if not image_urls and not file_urls:
             has_other_media = any(m.get("kind") == "media" for m in media_items)
             if has_other_media:
-                media_lines.append("file: media")
+                media_labels.append("file: media")
 
-        if media_lines:
-            desc = (desc + "\n\n" if desc else "") + "\n".join(media_lines)
+        if media_labels:
+            desc = (desc + "\n\n" if desc else "") + "\n".join(media_labels)
 
         title_text = text.strip()
         if not title_text:
@@ -246,6 +251,7 @@ def scrape_telegram_channel(channel: str, limit: int) -> TelegramChannel:
                 published=published,
                 title=title_text,
                 description=desc.strip(),
+                images=image_urls,
             )
         )
 

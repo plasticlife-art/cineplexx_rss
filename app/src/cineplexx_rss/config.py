@@ -20,6 +20,7 @@ class Config:
     max_events_in_state: int
     telegram_channels: list[str]
     telegram_post_limit: int
+    telegram_images_mode: str
     redis_url: str | None
     cache_enabled: bool
     film_cache_ttl_seconds: int
@@ -68,6 +69,16 @@ def load_config() -> Config:
         raw = os.getenv(name, "")
         items = [x.strip() for x in raw.split(",") if x.strip()]
         return items
+
+    def _telegram_images_mode() -> str:
+        raw = os.getenv("TELEGRAM_IMAGES_MODE", "all").strip().lower()
+        if raw in ("all", "first", "none"):
+            return raw
+        logging.getLogger(__name__).warning(
+            "invalid TELEGRAM_IMAGES_MODE=%s, using default=all",
+            os.getenv("TELEGRAM_IMAGES_MODE", ""),
+        )
+        return "all"
 
     max_events_in_state = _int("MAX_EVENTS_IN_STATE", 5000)
     if max_events_in_state <= 0:
@@ -158,6 +169,7 @@ def load_config() -> Config:
         max_events_in_state=max_events_in_state,
         telegram_channels=_list("TELEGRAM_CHANNELS"),
         telegram_post_limit=_int("TELEGRAM_POST_LIMIT", 5),
+        telegram_images_mode=_telegram_images_mode(),
         redis_url=redis_url,
         cache_enabled=cache_enabled,
         film_cache_ttl_seconds=film_cache_ttl_seconds,
