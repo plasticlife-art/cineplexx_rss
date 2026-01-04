@@ -148,7 +148,8 @@ def scrape_telegram_channel(channel: str, limit: int) -> TelegramChannel:
     description = parser.description or ""
 
     posts: List[TelegramPost] = []
-    for raw in parser.posts:
+    raw_posts = list(reversed(parser.posts))
+    for raw in raw_posts:
         post_id = raw.get("post_id") or ""
         published = raw.get("published") or ""
         if not post_id or not published:
