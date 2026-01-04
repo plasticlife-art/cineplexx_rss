@@ -123,6 +123,11 @@ def build_telegram_rss_xml(
     lines.append(f"<description>{escape(description)}</description>")
     lines.append(f"<lastBuildDate>{escape(pub_date)}</lastBuildDate>")
 
+    def _cdata(value: str) -> str:
+        if not value:
+            return ""
+        return "<![CDATA[" + value.replace("]]>", "]]]]><![CDATA[>") + "]]>"
+
     for item in items:
         item_title = item.get("title") or "Post"
         item_link = item.get("url") or link
@@ -139,7 +144,7 @@ def build_telegram_rss_xml(
         lines.append(f"<guid isPermaLink=\"true\">{escape(item_guid)}</guid>")
         lines.append(f"<pubDate>{escape(format_datetime(item_dt))}</pubDate>")
         if item_desc:
-            lines.append(f"<description>{escape(item_desc)}</description>")
+            lines.append(f"<description>{_cdata(item_desc)}</description>")
         lines.append("</item>")
 
     lines.append("</channel>")

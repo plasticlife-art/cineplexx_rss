@@ -5,6 +5,10 @@ from html.parser import HTMLParser
 from typing import List, Optional, Dict
 from urllib.request import Request, urlopen
 from urllib.parse import urljoin
+from urllib.parse import urlparse
+
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+_VIDEO_EXTS = {".mp4", ".mov", ".webm", ".m4v", ".avi"}
 
 
 @dataclass(frozen=True)
@@ -54,11 +58,29 @@ class _TelegramHtmlParser(HTMLParser):
         self._in_text = False
         self._text_div_depth = 0
         self._current: Optional[Dict[str, object]] = None
+        self._pending_media: Optional[Dict[str, str]] = None
+
+    @staticmethod
+    def _extract_bg_image(style: str) -> str:
+        if "background-image" not in style:
+            return ""
+        start = style.find("url(")
+        if start == -1:
+            return ""
+        raw = style[start + 4:].strip()
+        if raw.startswith(("'", '"')):
+            raw = raw[1:]
+        end = raw.find(")")
+        if end != -1:
+            raw = raw[:end]
+        raw = raw.strip().strip("'\"")
+        return raw
 
     def handle_starttag(self, tag: str, attrs: List[tuple[str, Optional[str]]]) -> None:
         attrs_dict = dict(attrs)
         cls = attrs_dict.get("class", "") or ""
         cls_tokens = cls.split()
+        style = attrs_dict.get("style", "") or ""
 
         if tag == "meta":
             prop = attrs_dict.get("property")
@@ -103,13 +125,28 @@ class _TelegramHtmlParser(HTMLParser):
             if not href or self._current is None:
                 return
             if "tgme_widget_message_photo_wrap" in cls or "tgme_widget_message_video_player" in cls:
-                self._current["media"].append(href)
+                self._current["media"].append({"url": href, "kind": "media"})
                 return
             if "tgme_widget_message_link_preview" in cls:
-                self._current["media"].append(href)
+                self._current["media"].append({"url": href, "kind": "link"})
                 return
             if self._in_text:
                 self._current["links"].append(href)
+
+        if self._in_message and tag == "a" and "tgme_widget_message_photo_wrap" in cls:
+            img_url = self._extract_bg_image(style)
+            if img_url and self._current is not None:
+                self._current["media"].append({"url": img_url, "kind": "image"})
+
+        if self._in_message and tag == "i" and "tgme_widget_message_video_thumb" in cls:
+            img_url = self._extract_bg_image(style)
+            if img_url and self._current is not None:
+                self._current["media"].append({"url": img_url, "kind": "image"})
+
+        if self._in_message and tag == "video":
+            src = attrs_dict.get("src") or ""
+            if src and self._current is not None:
+                self._current["media"].append({"url": src, "kind": "video"})
 
     def handle_endtag(self, tag: str) -> None:
         if self._in_text and tag == "div":
@@ -156,17 +193,45 @@ def scrape_telegram_channel(channel: str, limit: int) -> TelegramChannel:
             continue
         text = _normalize_text("".join(raw.get("text_parts") or []))
         links = _dedupe(raw.get("links") or [])
-        media = _dedupe(raw.get("media") or [])
+        media_items = raw.get("media") or []
         links = [urljoin("https://t.me/", l) if l.startswith("/") else l for l in links]
-        media = [urljoin("https://t.me/", m) if m.startswith("/") else m for m in media]
+        media_items = [
+            {
+                "url": urljoin("https://t.me/", m.get("url")) if m.get("url", "").startswith("/") else m.get("url"),
+                "kind": m.get("kind"),
+            }
+            for m in media_items
+        ]
         links = ["https:" + l if l.startswith("//") else l for l in links]
-        media = ["https:" + m if m.startswith("//") else m for m in media]
+        media_items = [
+            {"url": ("https:" + m["url"]) if m.get("url", "").startswith("//") else m.get("url", ""), "kind": m.get("kind")}
+            for m in media_items
+        ]
         url = f"https://t.me/{post_id}"
 
         desc = text
-        extra_links = _dedupe([*links, *media])
+        extra_links = _dedupe([*links, *[m.get("url") for m in media_items if m.get("kind") == "link"]])
         if extra_links:
             desc = (desc + "\n\n" if desc else "") + "\n".join(extra_links)
+
+        media_lines: List[str] = []
+        image_urls = _dedupe([m.get("url") for m in media_items if m.get("kind") == "image" and m.get("url")])
+        for img in image_urls:
+            media_lines.append(f'<img src="{img}" />')
+
+        file_urls = _dedupe([m.get("url") for m in media_items if m.get("kind") == "video" and m.get("url")])
+        for file_url in file_urls:
+            name = urlparse(file_url).path.rsplit("/", 1)[-1]
+            label = name or "video"
+            media_lines.append(f"file: {label}")
+
+        if not image_urls and not file_urls:
+            has_other_media = any(m.get("kind") == "media" for m in media_items)
+            if has_other_media:
+                media_lines.append("file: media")
+
+        if media_lines:
+            desc = (desc + "\n\n" if desc else "") + "\n".join(media_lines)
 
         title_text = text.strip()
         if not title_text:
