@@ -3,8 +3,7 @@ import logging
 import re
 from datetime import datetime, timedelta
 from time import perf_counter
-from typing import List
-from playwright.async_api import async_playwright
+from typing import List, Optional
 from .models import Movie, Session
 from .cache import cache_key_for_url, cache_key_for_sessions, Cache
 
@@ -26,6 +25,102 @@ async def _cache_set(cache: Cache, key: str, value: dict, ttl_seconds: int) -> N
         logging.getLogger(__name__).warning("cache_set_failed key=%s", key, exc_info=True)
 
 
+async def _build_movie_from_item(
+    *,
+    item: dict,
+    cache: Cache,
+    fetch_description,
+    fetch_sessions_for_date,
+    date_list: list[str],
+    schedule_enabled: bool,
+    schedule_max_sessions_per_movie: int,
+    schedule_max_dates_per_movie: int,
+    film_cache_ttl_seconds: int,
+    cache_negative_ttl_seconds: int,
+    logger: logging.Logger,
+) -> tuple[Movie, Optional[bool], int]:
+    title = _normalize_space(item.get("title", ""))
+    film_url = item.get("url", "")
+    if not film_url:
+        return Movie(title=title, url="", description="", sessions=[]), None, 0
+
+    cache_key = cache_key_for_url(film_url)
+    desc_cache_hit: Optional[bool] = None
+    desc = ""
+    movie_title = title
+
+    cached = await _cache_get(cache, cache_key)
+    if cached:
+        cached_desc = cached.get("description") or ""
+        if cached_desc or cached.get("error"):
+            desc_cache_hit = True
+            movie_title = cached.get("title") or title
+            desc = cached_desc
+
+    if desc_cache_hit is None:
+        desc_cache_hit = False
+        desc = await fetch_description(film_url)
+        if desc:
+            await _cache_set(
+                cache,
+                cache_key,
+                {
+                    "title": title,
+                    "description": desc,
+                    "fetched_at": datetime.utcnow().isoformat() + "Z",
+                    "source": "cineplexx",
+                },
+                film_cache_ttl_seconds,
+            )
+        else:
+            logger.warning("movie_description_missing url=%s", film_url)
+            await _cache_set(
+                cache,
+                cache_key,
+                {
+                    "title": title,
+                    "description": None,
+                    "error": "not_found",
+                    "fetched_at": datetime.utcnow().isoformat() + "Z",
+                    "source": "cineplexx",
+                },
+                cache_negative_ttl_seconds,
+            )
+
+    sessions: list[Session] = []
+    if schedule_enabled:
+        date_sessions = await asyncio.gather(
+            *(fetch_sessions_for_date(film_url, d) for d in date_list)
+        )
+        total_sessions = 0
+        for idx, session_date in enumerate(date_list):
+            if total_sessions >= schedule_max_sessions_per_movie:
+                break
+            raw_sessions = date_sessions[idx]
+            if not raw_sessions:
+                continue
+            if len(sessions) and len({s.date for s in sessions}) >= schedule_max_dates_per_movie:
+                break
+            for raw in raw_sessions:
+                if total_sessions >= schedule_max_sessions_per_movie:
+                    break
+                sessions.append(
+                    Session(
+                        date=session_date,
+                        time=raw.get("time", ""),
+                        hall=raw.get("hall", ""),
+                        info=raw.get("info", ""),
+                        session_id=raw.get("session_id", ""),
+                        cinema_name=raw.get("cinema_name", ""),
+                        purchase_url=raw.get("purchase_url", ""),
+                    )
+                )
+                total_sessions += 1
+
+    movie = Movie(title=movie_title, url=film_url, description=desc, sessions=sessions)
+    return movie, desc_cache_hit, len(sessions)
+
+
 async def scrape_movies(
     base_url: str,
     location: str,
@@ -42,6 +137,7 @@ async def scrape_movies(
     schedule_cache_ttl_seconds: int,
     schedule_cache_negative_ttl_seconds: int,
 ) -> List[Movie]:
+    from playwright.async_api import async_playwright
     url = f"{base_url}/cinemas?location={location}&date={date_str}"
     logger = logging.getLogger(__name__)
     logger.info("cineplexx_scrape_start url=%s location=%s date=%s", url, location, date_str)
@@ -288,79 +384,39 @@ async def scrape_movies(
 
         async def build_movie(item: dict) -> Movie:
             nonlocal cache_hits, cache_misses
-            title = _normalize_space(item.get("title", ""))
-            film_url = item.get("url", "")
-            if not film_url:
-                return Movie(title=title, url="", description="", sessions=[])
+            before_hits = schedule_cache_hits
+            before_misses = schedule_cache_misses
 
-            cache_key = cache_key_for_url(film_url)
-            cached = await _cache_get(cache, cache_key)
-            if cached:
-                desc = cached.get("description") or ""
-                cached_title = cached.get("title") or title
-                if desc or cached.get("error"):
-                    cache_hits += 1
-                    return Movie(title=cached_title or title, url=film_url, description=desc or "")
+            movie, desc_cache_hit, sessions_count = await _build_movie_from_item(
+                item=item,
+                cache=cache,
+                fetch_description=fetch_description,
+                fetch_sessions_for_date=fetch_sessions_for_date,
+                date_list=date_list,
+                schedule_enabled=schedule_enabled,
+                schedule_max_sessions_per_movie=schedule_max_sessions_per_movie,
+                schedule_max_dates_per_movie=schedule_max_dates_per_movie,
+                film_cache_ttl_seconds=film_cache_ttl_seconds,
+                cache_negative_ttl_seconds=cache_negative_ttl_seconds,
+                logger=logger,
+            )
 
-            cache_misses += 1
-            desc = await fetch_description(film_url)
-            if desc:
-                await _cache_set(
-                    cache,
-                    cache_key,
-                    {
-                        "title": title,
-                        "description": desc,
-                        "fetched_at": datetime.utcnow().isoformat() + "Z",
-                        "source": "cineplexx",
-                    },
-                    film_cache_ttl_seconds,
-                )
-            else:
-                logger.warning("movie_description_missing url=%s", film_url)
-                await _cache_set(
-                    cache,
-                    cache_key,
-                    {
-                        "title": title,
-                        "description": None,
-                        "error": "not_found",
-                        "fetched_at": datetime.utcnow().isoformat() + "Z",
-                        "source": "cineplexx",
-                    },
-                    cache_negative_ttl_seconds,
-                )
-            sessions: list[Session] = []
-            if schedule_enabled:
-                date_sessions = await asyncio.gather(
-                    *(fetch_sessions_for_date(film_url, d) for d in date_list)
-                )
-                total_sessions = 0
-                for idx, session_date in enumerate(date_list):
-                    if total_sessions >= schedule_max_sessions_per_movie:
-                        break
-                    raw_sessions = date_sessions[idx]
-                    if not raw_sessions:
-                        continue
-                    if len(sessions) and len({s.date for s in sessions}) >= schedule_max_dates_per_movie:
-                        break
-                    for raw in raw_sessions:
-                        if total_sessions >= schedule_max_sessions_per_movie:
-                            break
-                        sessions.append(
-                            Session(
-                                date=session_date,
-                                time=raw.get("time", ""),
-                                hall=raw.get("hall", ""),
-                                info=raw.get("info", ""),
-                                session_id=raw.get("session_id", ""),
-                                cinema_name=raw.get("cinema_name", ""),
-                                purchase_url=raw.get("purchase_url", ""),
-                            )
-                        )
-                        total_sessions += 1
+            if desc_cache_hit is True:
+                cache_hits += 1
+            elif desc_cache_hit is False:
+                cache_misses += 1
 
-            return Movie(title=title, url=film_url, description=desc, sessions=sessions)
+            sessions_cache_hit = schedule_cache_hits > before_hits
+            sessions_enabled = schedule_enabled
+            logger.info(
+                "movie_processed title=%s desc_cache_hit=%s sessions_enabled=%s sessions_cache_hit=%s sessions_count=%s",
+                movie.title,
+                desc_cache_hit,
+                sessions_enabled,
+                sessions_cache_hit,
+                sessions_count,
+            )
+            return movie
 
         tasks = [build_movie(item) for item in raw]
         movies = await asyncio.gather(*tasks)
