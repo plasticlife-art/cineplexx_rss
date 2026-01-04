@@ -5,10 +5,14 @@ services:
       context: .
       dockerfile: worker/Dockerfile
     container_name: cineplexx_worker_dev
+    depends_on:
+      - redis
     env_file:
       - ./app/.env
     environment:
       DEBUG: pw:api
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      CACHE_ENABLED: ${CACHE_ENABLED:-true}
     volumes:
       - rss_out:/out:z
     restart: unless-stopped
@@ -18,10 +22,14 @@ services:
     image: ${WORKER_IMAGE:-ghcr.io/${GITHUB_REPOSITORY_OWNER}/cineplexx_rss:latest}
     container_name: cineplexx_worker_prod
     user: "0:0"
+    depends_on:
+      - redis
     env_file:
       - ./app/.env
     environment:
       DEBUG: pw:api
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      CACHE_ENABLED: ${CACHE_ENABLED:-true}
     volumes:
       - rss_out:/out:z
     restart: unless-stopped
@@ -52,5 +60,15 @@ services:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro,Z
     restart: unless-stopped
 
+  redis:
+    profiles: ["dev", "prod"]
+    image: redis:7-alpine
+    container_name: cineplexx_redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
 volumes:
   rss_out:
+  redis_data:

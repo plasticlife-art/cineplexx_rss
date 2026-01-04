@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 from email.utils import format_datetime
 from typing import List, Dict
@@ -23,6 +24,7 @@ def build_rss_xml(
     events_limit: int,
     current_items: List[Movie],
 ) -> str:
+    logger = logging.getLogger(__name__)
     # RSS 2.0
     pub_date = format_datetime(now)
     lines = []
@@ -78,7 +80,13 @@ def build_rss_xml(
 
     lines.append("</channel>")
     lines.append("</rss>")
-    return "\n".join(lines)
+    rss_xml = "\n".join(lines)
+    logger.debug(
+        "cineplexx_rss_built events_count=%s current_count=%s",
+        len(events),
+        len(current_items),
+    )
+    return rss_xml
 
 
 def build_telegram_rss_xml(
@@ -89,6 +97,7 @@ def build_telegram_rss_xml(
     now: datetime,
     items: List[dict],
 ) -> str:
+    logger = logging.getLogger(__name__)
     pub_date = format_datetime(now)
     lines = []
     lines.append('<?xml version="1.0" encoding="UTF-8"?>')
@@ -120,4 +129,6 @@ def build_telegram_rss_xml(
 
     lines.append("</channel>")
     lines.append("</rss>")
-    return "\n".join(lines)
+    rss_xml = "\n".join(lines)
+    logger.debug("telegram_rss_built items_count=%s", len(items))
+    return rss_xml
