@@ -140,7 +140,7 @@ async def run(cfg, logger: logging.Logger, cache) -> dict:
                     "title": p.title,
                     "url": p.url,
                     "description": p.description,
-                    "content_text": p.description,
+                    "content_text": p.text,
                     "images": p.images,
                     "published": p.published,
                     "guid": p.url,

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+from html import unescape
 from html.parser import HTMLParser
 from typing import List, Optional, Dict
 from urllib.request import Request, urlopen
 from urllib.parse import urljoin
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qsl, urlencode
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 _VIDEO_EXTS = {".mp4", ".mov", ".webm", ".m4v", ".avi"}
@@ -18,6 +19,7 @@ class TelegramPost:
     url: str
     published: str
     title: str
+    text: str
     description: str
     images: List[str]
 
@@ -53,6 +55,7 @@ class _TelegramHtmlParser(HTMLParser):
         self.channel = channel
         self.title: Optional[str] = None
         self.description: Optional[str] = None
+        self.og_images: List[str] = []
         self.posts: List[Dict[str, object]] = []
 
         self._in_message = False
@@ -64,6 +67,7 @@ class _TelegramHtmlParser(HTMLParser):
 
     @staticmethod
     def _extract_bg_image(style: str) -> str:
+        style = unescape(style)
         if "background-image" not in style:
             return ""
         start = style.find("url(")
@@ -91,6 +95,8 @@ class _TelegramHtmlParser(HTMLParser):
                 self.title = content
             elif prop == "og:description" and content:
                 self.description = content
+            elif prop == "og:image" and content:
+                self.og_images.append(content)
 
         if tag == "div" and "tgme_widget_message" in cls_tokens:
             self._in_message = True
@@ -101,6 +107,7 @@ class _TelegramHtmlParser(HTMLParser):
                 "text_parts": [],
                 "links": [],
                 "media": [],
+                "has_photo_wrap": False,
             }
             return
 
@@ -126,7 +133,9 @@ class _TelegramHtmlParser(HTMLParser):
             href = attrs_dict.get("href")
             if not href or self._current is None:
                 return
-            if "tgme_widget_message_photo_wrap" in cls or "tgme_widget_message_video_player" in cls:
+            if "tgme_widget_message_photo_wrap" in cls:
+                self._current["has_photo_wrap"] = True
+            if "tgme_widget_message_video_player" in cls:
                 self._current["media"].append({"url": href, "kind": "media"})
                 return
             if "tgme_widget_message_link_preview" in cls:
@@ -135,10 +144,20 @@ class _TelegramHtmlParser(HTMLParser):
             if self._in_text:
                 self._current["links"].append(href)
 
-        if self._in_message and tag == "a" and "tgme_widget_message_photo_wrap" in cls:
+        if self._in_message and style and (
+            "tgme_widget_message_photo_wrap" in cls
+            or "tgme_widget_message_photo" in cls
+            or "grouped_media_wrap" in cls_tokens
+        ):
             img_url = self._extract_bg_image(style)
             if img_url and self._current is not None:
                 self._current["media"].append({"url": img_url, "kind": "image"})
+
+        if self._in_message and tag == "img" and self._current is not None:
+            if "tgme_widget_message_photo" in cls or "tgme_widget_message_photo_wrap" in cls:
+                src = attrs_dict.get("src") or ""
+                if src:
+                    self._current["media"].append({"url": src, "kind": "image"})
 
         if self._in_message and tag == "i" and "tgme_widget_message_video_thumb" in cls:
             img_url = self._extract_bg_image(style)
@@ -177,9 +196,36 @@ def _fetch(url: str) -> str:
         return resp.read().decode("utf-8", errors="replace")
 
 
+def _normalize_telegram_url(raw: str, logger: logging.Logger) -> tuple[str, bool]:
+    if raw.startswith("http://") or raw.startswith("https://"):
+        url = raw
+    else:
+        url = f"https://t.me/s/{raw}"
+
+    parsed = urlparse(url)
+    parts = [p for p in parsed.path.split("/") if p]
+    is_post_page = len(parts) == 2 and parts[0] != "s" and parts[1].isdigit()
+    if not is_post_page:
+        return url, False
+
+    query = dict(parse_qsl(parsed.query))
+    updated = False
+    if query.get("embed") != "1":
+        query["embed"] = "1"
+        updated = True
+    if query.get("mode") != "tme":
+        query["mode"] = "tme"
+        updated = True
+    if updated:
+        logger.info("telegram_fetch.embed_fallback_applied url=%s", url)
+    new_query = urlencode(query)
+    normalized = parsed._replace(query=new_query).geturl()
+    return normalized, True
+
+
 def scrape_telegram_channel(channel: str, limit: int) -> TelegramChannel:
     logger = logging.getLogger(__name__)
-    base = f"https://t.me/s/{channel}"
+    base, is_post_page = _normalize_telegram_url(channel, logger)
     html = _fetch(base)
     parser = _TelegramHtmlParser(channel)
     parser.feed(html)
@@ -222,6 +268,12 @@ def scrape_telegram_channel(channel: str, limit: int) -> TelegramChannel:
         )
         if any(m.get("kind") == "image" and not m.get("url") for m in media_items):
             logger.warning("telegram_image_missing_url channel=%s post=%s", channel, post_id)
+        if raw.get("has_photo_wrap") and not image_urls:
+            logger.warning("telegram_photo_wrap_no_image channel=%s post=%s", channel, post_id)
+
+        if not image_urls and parser.og_images and is_post_page:
+            image_urls = _dedupe(parser.og_images)
+            logger.info("telegram_image.og_fallback_used channel=%s post=%s", channel, post_id)
 
         file_urls = _dedupe([m.get("url") for m in media_items if m.get("kind") == "video" and m.get("url")])
         media_labels: List[str] = []
@@ -250,6 +302,7 @@ def scrape_telegram_channel(channel: str, limit: int) -> TelegramChannel:
                 url=url,
                 published=published,
                 title=title_text,
+                text=text.strip(),
                 description=desc.strip(),
                 images=image_urls,
             )
