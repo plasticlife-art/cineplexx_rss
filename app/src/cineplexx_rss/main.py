@@ -2,10 +2,11 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from time import perf_counter
+import time
 
 from .config import load_config
 from .scraper import scrape_movies
@@ -15,6 +16,7 @@ from .telegram import scrape_telegram_channel
 from .logging_utils import setup_logging, new_run_id, set_run_id
 from .cache import build_cache
 from .index import build_index_html, build_index_xml, FeedLink, atomic_write_text
+from .time_utils import format_duration
 
 
 def resolve_date(cfg) -> str:
@@ -26,10 +28,77 @@ def resolve_date(cfg) -> str:
     return datetime.now(tz).date().isoformat()
 
 
-async def run(cfg, logger: logging.Logger, cache) -> dict:
+def _write_status(cfg, payload: dict, logger: logging.Logger) -> None:
+    try:
+        (cfg.out_dir / "status.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            "utf-8",
+        )
+    except Exception:
+        logger.exception("status_write_failed")
+
+
+def _load_job_finished_at(path: Path, job_key: str) -> datetime | None:
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text("utf-8"))
+    except Exception:
+        return None
+    job = data.get(job_key) if isinstance(data, dict) else None
+    if not isinstance(job, dict):
+        return None
+    finished = job.get("finished_at")
+    if not finished:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(finished))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _build_index(cfg, cineplexx_updated: datetime | None, telegram_updated: datetime | None) -> None:
+    location_label = "Podgorica" if cfg.location == "0" else cfg.location
+    feeds: list[FeedLink] = [
+        FeedLink(
+            title=f"Cineplexx — {location_label}",
+            href=cfg.rss_filename,
+            kind="cineplexx",
+            subtitle=cfg.feed_description,
+        )
+    ]
+    for channel in cfg.telegram_channels:
+        feeds.append(
+            FeedLink(
+                title=f"Telegram — t.me/{channel}",
+                href=f"{channel}.xml",
+                kind="telegram",
+                subtitle=f"t.me/{channel}",
+            )
+        )
+
+    last_updated = datetime.now(ZoneInfo(cfg.timezone))
+    index_html = build_index_html(
+        feeds=feeds,
+        site_title="MyRssHub",
+        last_updated=last_updated,
+        cineplexx_updated=cineplexx_updated,
+        telegram_updated=telegram_updated,
+    )
+    index_xml = build_index_xml(
+        feeds=feeds,
+        site_title="MyRssHub",
+        last_updated=last_updated,
+    )
+    atomic_write_text(cfg.out_dir / "index.html", index_html)
+    atomic_write_text(cfg.out_dir / "index.xml", index_xml)
+
+
+async def run_cineplexx_job(cfg, logger: logging.Logger, cache) -> dict:
     tz = ZoneInfo(cfg.timezone)
-    now = datetime.now(tz)
-    now_utc = datetime.now(timezone.utc)
     date_str = resolve_date(cfg)
 
     state_path: Path = cfg.out_dir / f"state_location_{cfg.location}.json"
@@ -65,7 +134,8 @@ async def run(cfg, logger: logging.Logger, cache) -> dict:
         snapshot_before,
         events_before,
     )
-
+    now = datetime.now(tz)
+    now_utc = datetime.now(timezone.utc)
     ts_iso = now.isoformat(timespec="seconds")
     if added or removed:
         append_events(
@@ -112,6 +182,17 @@ async def run(cfg, logger: logging.Logger, cache) -> dict:
         rss_path,
     )
 
+    return {
+        "movies_found": len(current),
+        "added": len(added),
+        "removed": len(removed),
+        "sessions_fetched": sum(len(getattr(movie, "sessions", []) or []) for movie in current),
+    }
+
+
+def run_telegram_job(cfg, logger: logging.Logger) -> dict:
+    tz = ZoneInfo(cfg.timezone)
+    now = datetime.now(tz)
     telegram_errors = []
     telegram_ok = 0
     telegram_failed = 0
@@ -121,11 +202,7 @@ async def run(cfg, logger: logging.Logger, cache) -> dict:
             logger.info("telegram_scrape_start channel=%s", channel)
             try:
                 tg_start = perf_counter()
-                tg = await asyncio.to_thread(
-                    scrape_telegram_channel,
-                    channel,
-                    cfg.telegram_post_limit,
-                )
+                tg = scrape_telegram_channel(channel, cfg.telegram_post_limit)
                 tg_duration = perf_counter() - tg_start
             except Exception as exc:
                 telegram_failed += 1
@@ -166,149 +243,232 @@ async def run(cfg, logger: logging.Logger, cache) -> dict:
                 tg_path,
             )
 
-    location_label = "Podgorica" if cfg.location == "0" else cfg.location
-    feeds: list[FeedLink] = [
-        FeedLink(
-            title=f"Cineplexx — {location_label}",
-            href=cfg.rss_filename,
-            kind="cineplexx",
-            subtitle=cfg.feed_description,
-        )
-    ]
-    for channel in cfg.telegram_channels:
-        feeds.append(
-            FeedLink(
-                title=f"Telegram — t.me/{channel}",
-                href=f"{channel}.xml",
-                kind="telegram",
-                subtitle=f"t.me/{channel}",
-            )
-        )
-
-    last_updated = datetime.now(timezone.utc)
-    index_html = build_index_html(
-        feeds=feeds,
-        site_title="MyRssHub",
-        last_updated=last_updated,
-    )
-    index_xml = build_index_xml(
-        feeds=feeds,
-        site_title="MyRssHub",
-        last_updated=last_updated,
-    )
-    atomic_write_text(cfg.out_dir / "index.html", index_html)
-    atomic_write_text(cfg.out_dir / "index.xml", index_xml)
+    status = "ok"
+    if telegram_failed:
+        status = "partial"
 
     return {
-        "cineplexx": {
-            "movies_found": len(current),
-            "added": len(added),
-            "removed": len(removed),
-        },
-        "telegram": {
-            "channels_total": len(cfg.telegram_channels),
-            "channels_ok": telegram_ok,
-            "channels_failed": telegram_failed,
-        },
+        "status": status,
+        "channels_total": len(cfg.telegram_channels),
+        "channels_ok": telegram_ok,
+        "channels_failed": telegram_failed,
         "errors": telegram_errors,
     }
 
 
 def main() -> None:
-    run_id = new_run_id()
     setup_logging(os.getenv("LOG_LEVEL", "INFO"))
-    set_run_id(run_id)
     logger = logging.getLogger(__name__)
 
-    status_tz = ZoneInfo(os.getenv("TIMEZONE", "CET"))
-    started_at = datetime.now(status_tz)
-    start_ts = perf_counter()
-    status = "ok"
-    errors = []
-    cineplexx_counts = {"movies_found": 0, "added": 0, "removed": 0}
-    telegram_counts = {"channels_total": 0, "channels_ok": 0, "channels_failed": 0}
-    error_exc = None
-    cfg = None
-    cache = None
+    cfg = load_config()
+    tz = ZoneInfo(cfg.timezone)
+
+    logger.info(
+        "cache_config enabled=%s ttl_seconds=%s negative_ttl_seconds=%s max_concurrency=%s redis_url=%s",
+        cfg.cache_enabled,
+        cfg.film_cache_ttl_seconds,
+        cfg.cache_negative_ttl_seconds,
+        cfg.max_film_pages_concurrency,
+        cfg.redis_url or "",
+    )
+    logger.info(
+        "schedule_config enabled=%s max_days_ahead=%s max_sessions_per_movie=%s max_dates_per_movie=%s concurrency=%s",
+        cfg.schedule_enabled,
+        cfg.schedule_max_days_ahead,
+        cfg.schedule_max_sessions_per_movie,
+        cfg.schedule_max_dates_per_movie,
+        cfg.schedule_concurrency,
+    )
+    logger.info(
+        "intervals cineplexx_enabled=%s cineplexx_interval_seconds=%s telegram_enabled=%s telegram_interval_seconds=%s",
+        cfg.cineplexx_enabled,
+        cfg.cineplexx_interval_seconds,
+        cfg.telegram_enabled,
+        cfg.telegram_interval_seconds,
+    )
+
+    cache = build_cache(cfg, logger)
+
+    next_cineplexx = datetime.now(tz)
+    next_telegram = datetime.now(tz)
+    status_path = cfg.out_dir / "status.json"
 
     try:
-        cfg = load_config()
-        logger.info(
-            "cache_config enabled=%s ttl_seconds=%s negative_ttl_seconds=%s max_concurrency=%s redis_url=%s",
-            cfg.cache_enabled,
-            cfg.film_cache_ttl_seconds,
-            cfg.cache_negative_ttl_seconds,
-            cfg.max_film_pages_concurrency,
-            cfg.redis_url or "",
-        )
-        logger.info(
-            "schedule_config enabled=%s max_days_ahead=%s max_sessions_per_movie=%s max_dates_per_movie=%s concurrency=%s",
-            cfg.schedule_enabled,
-            cfg.schedule_max_days_ahead,
-            cfg.schedule_max_sessions_per_movie,
-            cfg.schedule_max_dates_per_movie,
-            cfg.schedule_concurrency,
-        )
-        cache = build_cache(cfg, logger)
-        logger.info(
-            "run_start location=%s date_mode=%s out_dir=%s events_limit=%s max_movies=%s telegram_channels_count=%s",
-            cfg.location,
-            cfg.date_mode,
-            cfg.out_dir,
-            cfg.events_limit,
-            "none",
-            len(cfg.telegram_channels),
-        )
-        result = asyncio.run(run(cfg, logger, cache))
-        cineplexx_counts = result["cineplexx"]
-        telegram_counts = result["telegram"]
-        errors.extend(result["errors"])
-        if telegram_counts["channels_failed"] > 0:
-            status = "partial"
-    except Exception as exc:
-        status = "error"
-        errors.append({"scope": "cineplexx", "message": str(exc)})
-        logger.exception("run_failed")
-        error_exc = exc
-    finally:
-        finished_at = datetime.now(status_tz)
-        duration_ms = int((perf_counter() - start_ts) * 1000)
-        status_payload = {
-            "run_id": run_id,
-            "started_at": started_at.isoformat(),
-            "finished_at": finished_at.isoformat(),
-            "duration_ms": duration_ms,
-            "status": status,
-            "cineplexx": cineplexx_counts,
-            "telegram": telegram_counts,
-            "errors": errors[:20],
-        }
-        if cfg is not None:
-            try:
-                (cfg.out_dir / "status.json").write_text(
-                    json.dumps(status_payload, ensure_ascii=False, indent=2),
-                    "utf-8",
+        while True:
+            now = datetime.now(tz)
+            cineplexx_due = cfg.cineplexx_enabled and now >= next_cineplexx
+            telegram_due = cfg.telegram_enabled and now >= next_telegram
+
+            if not cineplexx_due and not telegram_due:
+                next_cineplexx_at = next_cineplexx if cfg.cineplexx_enabled else None
+                next_telegram_at = next_telegram if cfg.telegram_enabled else None
+                next_run_at = None
+                if next_cineplexx_at and next_telegram_at:
+                    next_run_at = min(next_cineplexx_at, next_telegram_at)
+                else:
+                    next_run_at = next_cineplexx_at or next_telegram_at
+
+                if next_run_at is None:
+                    sleep_for = 60
+                    logger.info("scheduler_idle seconds=%s", sleep_for)
+                    time.sleep(sleep_for)
+                    continue
+
+                sleep_seconds = next_run_at - now
+                sleep_for = max(1, int(sleep_seconds.total_seconds()))
+                logger.info(
+                    "scheduler_sleep seconds=%s next_cineplexx_run_at=%s next_telegram_run_at=%s",
+                    sleep_for,
+                    next_cineplexx.isoformat(),
+                    next_telegram.isoformat(),
                 )
-            except Exception:
-                logger.exception("status_write_failed")
+                time.sleep(sleep_for)
+                continue
+
+            run_id = new_run_id()
+            set_run_id(run_id)
+
+            cineplexx_last: datetime | None = None
+            telegram_last: datetime | None = None
+
+            status_payload = {
+                "run_id": run_id,
+                "updated_at": now.isoformat(),
+                "cineplexx_job": {"enabled": cfg.cineplexx_enabled, "status": "skipped"},
+                "telegram_job": {"enabled": cfg.telegram_enabled, "status": "skipped"},
+            }
+
+            if cineplexx_due:
+                job_started = datetime.now(tz)
+                logger.info("cineplexx_job_start run_at=%s", job_started.isoformat())
+                start_ts = perf_counter()
+                cineplexx_status = "ok"
+                cineplexx_error = None
+                cineplexx_counts = {
+                    "movies_found": 0,
+                    "added": 0,
+                    "removed": 0,
+                    "sessions_fetched": 0,
+                }
+                try:
+                    result = asyncio.run(run_cineplexx_job(cfg, logger, cache))
+                    cineplexx_counts.update(result)
+                except Exception as exc:
+                    cineplexx_status = "error"
+                    cineplexx_error = {"message": str(exc)}
+                    logger.exception("cineplexx_job_failed")
+
+                finished_at = datetime.now(tz)
+                duration_seconds = perf_counter() - start_ts
+                status_payload["cineplexx_job"] = {
+                    "enabled": cfg.cineplexx_enabled,
+                    "status": cineplexx_status,
+                    "started_at": job_started.isoformat(),
+                    "finished_at": finished_at.isoformat(),
+                    "duration_seconds": duration_seconds,
+                    "duration_human": format_duration(duration_seconds),
+                    **cineplexx_counts,
+                }
+                if cineplexx_error:
+                    status_payload["cineplexx_job"]["error"] = cineplexx_error
+                logger.info(
+                    "cineplexx_job_end status=%s duration_human=%s",
+                    cineplexx_status,
+                    status_payload["cineplexx_job"]["duration_human"],
+                )
+                next_cineplexx = finished_at + timedelta(seconds=cfg.cineplexx_interval_seconds)
+                status_payload["updated_at"] = datetime.now(tz).isoformat()
+                _write_status(cfg, status_payload, logger)
+                cineplexx_last = finished_at
+
+            if telegram_due:
+                job_started = datetime.now(tz)
+                logger.info("telegram_job_start run_at=%s", job_started.isoformat())
+                start_ts = perf_counter()
+                telegram_status = "ok"
+                telegram_error = None
+                telegram_counts = {
+                    "channels_total": len(cfg.telegram_channels),
+                    "channels_ok": 0,
+                    "channels_failed": 0,
+                }
+                try:
+                    result = run_telegram_job(cfg, logger)
+                    telegram_status = result["status"]
+                    telegram_counts.update(
+                        {
+                            "channels_total": result["channels_total"],
+                            "channels_ok": result["channels_ok"],
+                            "channels_failed": result["channels_failed"],
+                        }
+                    )
+                    if result["errors"]:
+                        telegram_error = {"message": result["errors"][0]["message"]}
+                except Exception as exc:
+                    telegram_status = "error"
+                    telegram_error = {"message": str(exc)}
+                    logger.exception("telegram_job_failed")
+
+                finished_at = datetime.now(tz)
+                duration_seconds = perf_counter() - start_ts
+                status_payload["telegram_job"] = {
+                    "enabled": cfg.telegram_enabled,
+                    "status": telegram_status,
+                    "started_at": job_started.isoformat(),
+                    "finished_at": finished_at.isoformat(),
+                    "duration_seconds": duration_seconds,
+                    "duration_human": format_duration(duration_seconds),
+                    **telegram_counts,
+                }
+                if telegram_error:
+                    status_payload["telegram_job"]["error"] = telegram_error
+                logger.info(
+                    "telegram_job_end status=%s duration_human=%s",
+                    telegram_status,
+                    status_payload["telegram_job"]["duration_human"],
+                )
+                next_telegram = finished_at + timedelta(seconds=cfg.telegram_interval_seconds)
+                status_payload["updated_at"] = datetime.now(tz).isoformat()
+                _write_status(cfg, status_payload, logger)
+                telegram_last = finished_at
+
+            if cineplexx_due or telegram_due:
+                if cineplexx_last is None:
+                    cineplexx_last = _load_job_finished_at(status_path, "cineplexx_job")
+                if telegram_last is None:
+                    telegram_last = _load_job_finished_at(status_path, "telegram_job")
+                _build_index(cfg, cineplexx_updated=cineplexx_last, telegram_updated=telegram_last)
+
+            now = datetime.now(tz)
+            next_cineplexx_at = next_cineplexx if cfg.cineplexx_enabled else None
+            next_telegram_at = next_telegram if cfg.telegram_enabled else None
+            next_run_at = None
+            if next_cineplexx_at and next_telegram_at:
+                next_run_at = min(next_cineplexx_at, next_telegram_at)
+            else:
+                next_run_at = next_cineplexx_at or next_telegram_at
+
+            if next_run_at is None:
+                sleep_for = 60
+                logger.info("scheduler_idle seconds=%s", sleep_for)
+                time.sleep(sleep_for)
+                continue
+
+            sleep_seconds = next_run_at - now
+            sleep_for = max(1, int(sleep_seconds.total_seconds()))
+            logger.info(
+                "scheduler_sleep seconds=%s next_cineplexx_run_at=%s next_telegram_run_at=%s",
+                sleep_for,
+                next_cineplexx.isoformat(),
+                next_telegram.isoformat(),
+            )
+            time.sleep(sleep_for)
+    finally:
         if cache is not None:
             try:
                 cache.close()
             except Exception:
                 logger.debug("cache_close_failed", exc_info=True)
-        logger.info(
-            "run_end status=%s duration_ms=%s movies_found=%s added=%s removed=%s telegram_ok=%s telegram_failed=%s",
-            status,
-            duration_ms,
-            cineplexx_counts["movies_found"],
-            cineplexx_counts["added"],
-            cineplexx_counts["removed"],
-            telegram_counts["channels_ok"],
-            telegram_counts["channels_failed"],
-        )
-
-    if error_exc is not None:
-        raise error_exc
 
 
 if __name__ == "__main__":

@@ -18,6 +18,10 @@ class Config:
     rss_filename: str
     events_limit: int
     max_events_in_state: int
+    cineplexx_enabled: bool
+    cineplexx_interval_seconds: int
+    telegram_enabled: bool
+    telegram_interval_seconds: int
     telegram_channels: list[str]
     telegram_post_limit: int
     telegram_images_mode: str
@@ -87,6 +91,24 @@ def load_config() -> Config:
             os.getenv("MAX_EVENTS_IN_STATE", ""),
         )
         max_events_in_state = 5000
+
+    cineplexx_enabled = _bool("CINEPLEXX_ENABLED", True)
+    cineplexx_interval_seconds = _int("CINEPLEXX_INTERVAL_SECONDS", 3600)
+    if cineplexx_interval_seconds <= 0:
+        logging.getLogger(__name__).warning(
+            "invalid CINEPLEXX_INTERVAL_SECONDS=%s, using default=3600",
+            os.getenv("CINEPLEXX_INTERVAL_SECONDS", ""),
+        )
+        cineplexx_interval_seconds = 3600
+
+    telegram_enabled = _bool("TELEGRAM_ENABLED", True)
+    telegram_interval_seconds = _int("TELEGRAM_INTERVAL_SECONDS", 21600)
+    if telegram_interval_seconds <= 0:
+        logging.getLogger(__name__).warning(
+            "invalid TELEGRAM_INTERVAL_SECONDS=%s, using default=21600",
+            os.getenv("TELEGRAM_INTERVAL_SECONDS", ""),
+        )
+        telegram_interval_seconds = 21600
 
     redis_url = os.getenv("REDIS_URL", "").strip() or None
     cache_enabled = _bool("CACHE_ENABLED", bool(redis_url))
@@ -167,6 +189,10 @@ def load_config() -> Config:
         rss_filename=os.getenv("RSS_FILENAME", "cineplexx_rss.xml"),
         events_limit=_int("EVENTS_LIMIT", 150),
         max_events_in_state=max_events_in_state,
+        cineplexx_enabled=cineplexx_enabled,
+        cineplexx_interval_seconds=cineplexx_interval_seconds,
+        telegram_enabled=telegram_enabled,
+        telegram_interval_seconds=telegram_interval_seconds,
         telegram_channels=_list("TELEGRAM_CHANNELS"),
         telegram_post_limit=_int("TELEGRAM_POST_LIMIT", 5),
         telegram_images_mode=_telegram_images_mode(),
